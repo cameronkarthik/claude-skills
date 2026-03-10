@@ -21,6 +21,19 @@ Skills for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) focused
 | [Solana Anchor Deployment](skills/solana-anchor-deployment/SKILL.md) | Full Anchor deployment lifecycle. PDA initialization, Ed25519 signing, keypair management, Helius RPC config, and devnet-to-mainnet migration checklist. |
 | [Crypto Refund System](skills/crypto-refund-system/SKILL.md) | Complete refund architecture for crypto deposits. Cancellation signing, atomic persistence, claim flows, Solana rent accounting, emergency cancel, and mutual exclusion patterns. |
 
+### Operations & Security
+
+| Skill | Description |
+|---|---|
+| [Stealth Bundle](skills/stealth-bundle/SKILL.md) | Staggered multi-wallet transaction execution with configurable jitter. Avoids on-chain clustering detection for coordinated operations. |
+| [Wallet Safety Check](skills/wallet-safety-check/SKILL.md) | Pre-push security audit for crypto projects. Scans for private key exposure, credential leaks, unsafe storage, and git history contamination. |
+
+### Content & Research
+
+| Skill | Description |
+|---|---|
+| [Crypto Alpha Writer](skills/crypto-alpha-writer/SKILL.md) | On-chain intelligence report generation targeting CT/degen audience. Data collection via paid APIs, cross-referencing, and natural non-AI voice. |
+
 ### Real-Time Multiplayer
 
 | Skill | Description |
@@ -65,8 +78,14 @@ These skills are distilled from:
 - **3 wallet architecture iterations** (localStorage -> in-memory -> encrypted IndexedDB vault)
 - **3 smart contract iterations** (Solidity on Base, Anchor on Solana)
 - **Dual-chain deployment** (Base + Solana mainnet) with production traffic
+- **6 iterations** on AI-generated crypto content to eliminate AI voice patterns
+- **Autonomous agent experiment** with real USDC budget and micropayment APIs
 
 Each skill captures the patterns that survived production and the mistakes to avoid, so you don't have to learn them the hard way.
+
+## Session Analysis
+
+See [SESSION-ANALYSIS.md](SESSION-ANALYSIS.md) for a full breakdown of all Claude Code sessions, workflow patterns, and recommendations for future skills/plugins/agents.
 
 ## Contributing
 
