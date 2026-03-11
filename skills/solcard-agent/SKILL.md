@@ -1,0 +1,543 @@
+---
+name: solcard-agent
+description: Use when the agent needs to pay online with crypto. Converts USDC/SOL/ETH into virtual Visa/Mastercard via SolCard's reverse-engineered API. Session capture, deposit flow, card retrieval.
+version: 0.1.0
+tools: Read, Grep, Glob, Bash, WebFetch
+---
+
+# SolCard Agent: Crypto-to-Card Payment Automation
+
+Gives an autonomous agent (or any Claude Code user) the ability to convert on-chain crypto into a virtual Visa/Mastercard that works at 150M+ merchants. Built from reverse-engineering SolCard's app bundle -- the API is undocumented, so every endpoint here was extracted from production network traffic and client-side code.
+
+## When to Use
+
+- Agent has USDC/SOL/ETH on-chain and needs to pay for something online
+- You need a virtual card number (PAN, CVV, expiry) to complete a purchase
+- You want to top up a reusable virtual card from any of 9 supported networks
+- You need to check deposit status, card balance, or available card types
+- You want to automate the full flow: deposit crypto -> get card details -> make purchase
+
+## Prerequisites (Manual Bootstrap)
+
+SolCard uses email magic link auth + Fingerprint.js device binding. There is no API key -- you must bootstrap a session from the browser.
+
+### One-Time Account Setup
+
+1. Go to [solcard.cc](https://solcard.cc) and create an account with email magic link
+2. Complete KYC if you want the Visa card (0% topup fee vs 5% on Mastercard)
+3. Create at least one virtual card from the dashboard
+
+### Session Extraction (DevTools)
+
+This is the critical bootstrap step. The agent cannot do this -- a human must extract cookies and headers once, then the agent maintains the session via refresh.
+
+1. Open [app.solcard.cc](https://app.solcard.cc) in Chrome
+2. Open DevTools (F12) -> Network tab
+3. Filter by `api.solcard.cc`
+4. Click any page/action to trigger an API call
+5. Right-click any request to `api.solcard.cc` -> Copy -> Copy as cURL
+6. Extract these values from the cURL:
+
+```bash
+# From the Cookie header:
+connect.sid=s%3A<long-base64-value>
+__cf_bm=<cloudflare-bot-management-cookie>
+
+# From request headers:
+x-csrf-token: <token-from-response-header-or-meta-tag>
+x-fp-sealed-result: <fingerprint-js-sealed-result>
+```
+
+7. Store them in an encrypted session file:
+
+```typescript
+interface SolCardSession {
+  connectSid: string;        // connect.sid cookie value
+  cfBm: string;              // __cf_bm cookie value (Cloudflare)
+  csrfToken: string;         // x-csrf-token header
+  fpSealedResult: string;    // x-fp-sealed-result header (Fingerprint.js)
+  extractedAt: string;       // ISO timestamp
+  lastRefreshedAt: string;   // ISO timestamp
+}
+```
+
+```bash
+# Encrypt and store the session
+echo '{"connectSid":"...","cfBm":"...","csrfToken":"...","fpSealedResult":"..."}' \
+  | openssl enc -aes-256-cbc -pbkdf2 -salt -out ~/.solcard-session.enc
+```
+
+## Session Management
+
+### Request Headers
+
+Every request to `api.solcard.cc` must include:
+
+```typescript
+function buildHeaders(session: SolCardSession): Record<string, string> {
+  return {
+    'Cookie': `connect.sid=${session.connectSid}; __cf_bm=${session.cfBm}`,
+    'x-csrf-token': session.csrfToken,
+    'x-fp-sealed-result': session.fpSealedResult,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Origin': 'https://app.solcard.cc',
+    'Referer': 'https://app.solcard.cc/',
+  };
+}
+```
+
+### Session Refresh
+
+The session must be refreshed before it expires. Call this proactively, not reactively.
+
+```bash
+# Refresh session -- returns new cookies in Set-Cookie headers
+curl -X POST https://api.solcard.cc/v2/auth/refresh \
+  -H "Cookie: connect.sid=${CONNECT_SID}; __cf_bm=${CF_BM}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}" \
+  -H "Content-Type: application/json" \
+  -H "Origin: https://app.solcard.cc" \
+  -v 2>&1
+```
+
+**Critical: CSRF rotation.** The response `Set-Cookie` headers contain a new CSRF token. You MUST parse and store the updated token for subsequent requests. Failing to do this causes 403s on the next call.
+
+```typescript
+function updateSessionFromResponse(
+  session: SolCardSession,
+  response: Response
+): SolCardSession {
+  const setCookie = response.headers.get('set-cookie') || '';
+
+  // Parse new connect.sid if present
+  const sidMatch = setCookie.match(/connect\.sid=([^;]+)/);
+  if (sidMatch) session.connectSid = sidMatch[1];
+
+  // Parse new __cf_bm if present
+  const cfMatch = setCookie.match(/__cf_bm=([^;]+)/);
+  if (cfMatch) session.cfBm = cfMatch[1];
+
+  // Parse new CSRF token if present
+  const csrfMatch = setCookie.match(/csrf[_-]?token=([^;]+)/i);
+  if (csrfMatch) session.csrfToken = csrfMatch[1];
+
+  // Also check x-csrf-token response header
+  const csrfHeader = response.headers.get('x-csrf-token');
+  if (csrfHeader) session.csrfToken = csrfHeader;
+
+  session.lastRefreshedAt = new Date().toISOString();
+  return session;
+}
+```
+
+### Fingerprint Expiry Detection
+
+The `x-fp-sealed-result` is generated by Fingerprint.js Pro and is bound to the browser/device. It expires after approximately 24 hours.
+
+**Detection:** A 403 response with body containing `"fingerprint"` or `"sealed"` indicates the fingerprint has expired.
+
+**Recovery:** The agent CANNOT regenerate this. It must alert the user to re-extract from the browser. Build this into your error handling:
+
+```typescript
+async function solcardFetch(
+  url: string,
+  session: SolCardSession,
+  options: RequestInit = {}
+): Promise<Response> {
+  const response = await fetch(url, {
+    ...options,
+    headers: { ...buildHeaders(session), ...options.headers },
+  });
+
+  // Update session from response cookies
+  updateSessionFromResponse(session, response);
+
+  if (response.status === 403) {
+    const body = await response.text();
+    if (body.includes('fingerprint') || body.includes('sealed')) {
+      throw new Error(
+        'FINGERPRINT_EXPIRED: SolCard fingerprint has expired (~24h). '
+        + 'User must re-extract session from browser DevTools.'
+      );
+    }
+    throw new Error(`CSRF_OR_AUTH_ERROR: 403 from SolCard. Body: ${body}`);
+  }
+
+  return response;
+}
+```
+
+## API Reference
+
+**Base URL:** `https://api.solcard.cc`
+
+All endpoints require the session headers from `buildHeaders()`. Responses are JSON unless noted.
+
+### Auth
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/auth/user` | Current user info (email, KYC status, account tier) |
+| POST | `/v2/auth/refresh` | Refresh session. Returns new cookies in Set-Cookie |
+| GET | `/v2/auth/logout` | Invalidate session |
+
+```typescript
+// GET /auth/user response
+interface AuthUser {
+  id: string;
+  email: string;
+  kycStatus: 'NONE' | 'PENDING' | 'VERIFIED';
+  tier: string;
+  createdAt: string;
+}
+```
+
+### Cards
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/cards` | List all cards (id, last4, type, balance, status) |
+| GET | `/cards/available-types` | Card types available for creation |
+| GET | `/cards/slot/{id}` | Full card details (PAN, CVV, expiry) |
+| GET | `/cards/deposit-types?vid={vid}&slotNum={slotNum}` | Available deposit methods for a card |
+| POST | `/cards/slot/{slot}/deposit` | Initiate a crypto deposit to card |
+
+```typescript
+// GET /cards response
+interface Card {
+  id: string;
+  slotNum: number;
+  vid: string;           // vendor/card-type ID
+  last4: string;
+  brand: 'VISA' | 'MASTERCARD';
+  status: 'ACTIVE' | 'FROZEN' | 'CLOSED';
+  balance: number;       // USD cents
+  holderId: string;
+  createdAt: string;
+}
+
+// GET /cards/slot/{id} response
+// WARNING: May not return full PAN/CVV -- see Gotchas section
+interface CardDetails {
+  pan: string;           // full 16-digit card number
+  cvv: string;           // 3-digit CVV
+  expMonth: string;      // MM
+  expYear: string;       // YYYY
+  cardholderName: string;
+  billingAddress: {
+    line1: string;
+    city: string;
+    state: string;
+    zip: string;
+    country: string;
+  };
+}
+
+// POST /cards/slot/{slot}/deposit request
+interface DepositRequest {
+  amount: number;        // USD amount (e.g. 50.00)
+  currency: string;      // e.g. "USDC", "SOL", "ETH"
+  vid: string;           // from card.vid
+  holderId: string;      // from card.holderId
+}
+
+// POST /cards/slot/{slot}/deposit response
+interface DepositResponse {
+  depositId: string;
+  depositAddress: string;  // on-chain address to send funds
+  network: string;         // e.g. "SOLANA", "BASE"
+  expectedAmount: string;  // crypto amount to send (includes fees)
+  expiresAt: string;       // address expiry timestamp
+  status: 'PENDING_PAYMENT';
+}
+```
+
+### Deposits
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/deposit/fee?vid={vid}&amount={amount}` | Fee quote before depositing |
+| GET | `/deposit/{id}` | Poll deposit status |
+
+```typescript
+// GET /v1/deposit/fee response
+interface FeeQuote {
+  amount: number;         // requested USD amount
+  fee: number;            // fee in USD
+  feePercent: number;     // e.g. 5.0 for Mastercard, 0.0 for Visa
+  total: number;          // amount + fee
+  cryptoAmount: string;   // equivalent crypto amount
+  rate: number;           // USD/crypto exchange rate
+  network: string;
+}
+
+// GET /deposit/{id} response
+interface DepositStatus {
+  id: string;
+  status: 'PENDING_PAYMENT' | 'CONFIRMING' | 'COMPLETED' | 'EXPIRED' | 'FAILED';
+  txHash: string | null;
+  confirmations: number;
+  requiredConfirmations: number;
+  completedAt: string | null;
+}
+```
+
+### KYC / Card Holders
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/card-holder?vid={vid}` | Get card holder info |
+| POST | `/card-holder` | Create card holder (KYC submission) |
+
+### Vouchers & Referrals
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/vouchers` | List available vouchers |
+| POST | `/vouchers/apply` | Apply a voucher code |
+| POST | `/referrals/use-code` | Apply a referral code |
+
+### Fund Recovery
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/fund-recovery/without-address` | List recoverable funds sent without deposit address |
+| GET | `/v1/fund-recovery/slot/{id}/request?type=WITHDRAW` | Initiate fund recovery/withdrawal |
+| PUT | `/v2/fund-recovery/request/{id}/destination` | Set withdrawal destination address |
+
+## Core Flow: Deposit to Purchase
+
+This is the end-to-end flow for converting on-chain crypto into a merchant payment.
+
+### Step 1: Check Session & Card
+
+```bash
+# Verify session is alive
+curl -s https://api.solcard.cc/auth/user \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}"
+
+# List cards and pick the target
+curl -s https://api.solcard.cc/cards \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}"
+```
+
+### Step 2: Get Fee Quote
+
+```bash
+# Check fees before committing
+# vid = card vendor ID from /cards response
+curl -s "https://api.solcard.cc/v1/deposit/fee?vid=${VID}&amount=50" \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}"
+```
+
+**Decision point:** If fee is unacceptable, try a different card type (Visa = 0% vs Mastercard = 5%).
+
+### Step 3: Check Deposit Types
+
+```bash
+# What networks/currencies are available for this card?
+curl -s "https://api.solcard.cc/cards/deposit-types?vid=${VID}&slotNum=${SLOT_NUM}" \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}"
+```
+
+### Step 4: Initiate Deposit
+
+```bash
+# Get a deposit address
+curl -s -X POST "https://api.solcard.cc/cards/slot/${SLOT}/deposit" \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 50, "currency": "USDC", "vid": "'${VID}'", "holderId": "'${HOLDER_ID}'"}'
+```
+
+**Critical:** The deposit address may be per-request, not per-card. Always use the fresh address from the API response. Never reuse a previous deposit address.
+
+### Step 5: Send Crypto On-Chain
+
+Use your wallet/agent to send the exact `expectedAmount` to the `depositAddress` on the specified `network`. The agent should:
+
+1. Verify the address matches the expected network
+2. Send the exact amount (not more, not less)
+3. Save the transaction hash
+
+### Step 6: Poll for Confirmation
+
+```bash
+# Poll every 10s until COMPLETED or FAILED
+curl -s "https://api.solcard.cc/deposit/${DEPOSIT_ID}" \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}"
+```
+
+Expected confirmation times by network:
+- **Solana:** ~5 seconds (fastest)
+- **Base:** ~2-5 seconds (cheapest gas)
+- **Polygon:** ~5-10 seconds
+- **Arbitrum:** ~5-10 seconds
+- **Optimism:** ~5-10 seconds
+- **BNB:** ~15 seconds
+- **Avalanche:** ~5 seconds
+- **Ethereum:** ~15-60 seconds (most expensive)
+- **HyperEVM:** varies
+
+### Step 7: Retrieve Card Details
+
+```bash
+# Once deposit is COMPLETED, get the card details for purchase
+curl -s "https://api.solcard.cc/cards/slot/${CARD_ID}" \
+  -H "Cookie: connect.sid=${CONNECT_SID}" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" \
+  -H "x-fp-sealed-result: ${FP_SEALED}"
+```
+
+### Step 8: Make Purchase
+
+Hand off the card details (PAN, CVV, expiry, billing address) to the purchase flow. The agent should:
+
+1. Never log the full PAN or CVV
+2. Use the card details in memory only
+3. Clear card details from memory after purchase
+4. Verify the charge amount matches expectations
+
+## Network / Currency Matrix
+
+| Network | USDC | USDT | SOL | ETH | Native | Notes |
+|---------|------|------|-----|-----|--------|-------|
+| SOLANA | yes | yes | yes | -- | SOL | Fastest deposits (~5s) |
+| BASE | yes | yes | -- | yes | ETH | Cheapest gas fees |
+| ETHEREUM | yes | yes | -- | yes | ETH | Most expensive, slowest |
+| POLYGON | yes | yes | -- | -- | MATIC | Good balance of speed/cost |
+| ARBITRUM | yes | yes | -- | yes | ETH | Fast L2 |
+| OPTIMISM | yes | yes | -- | yes | ETH | Fast L2 |
+| BNB | yes | yes | -- | -- | BNB | Binance chain |
+| AVALANCHE | yes | yes | -- | -- | AVAX | Fast finality |
+| HYPEREVM | yes | -- | -- | -- | -- | Limited currency support |
+
+**Recommendation:** Use Solana for speed, Base for cost, Ethereum only if funds are already there.
+
+## Card Types & Fees
+
+| Card Type | Brand | Topup Fee | KYC Required | Notes |
+|-----------|-------|-----------|--------------|-------|
+| Standard | Mastercard | 5% | No | Quick start, higher fees |
+| Full Access | Visa | 0% | Yes (ID + selfie) | No topup fee, worth the KYC |
+
+Additional costs:
+- **FX spread:** 0-2% on non-USD merchants (card is USD-denominated)
+- **Network gas:** Varies by chain (see matrix above)
+- **Crypto spread:** Exchange rate may include a small spread vs market rate
+
+## Security Rules
+
+These are non-negotiable for agent implementations:
+
+1. **Never store PAN or CVV to disk.** Card details exist in memory only, for the duration of a single purchase. Wipe after use.
+
+2. **Encrypted session storage.** The session file must be encrypted at rest:
+   ```bash
+   # Write session
+   echo "$SESSION_JSON" | openssl enc -aes-256-cbc -pbkdf2 -salt \
+     -out ~/.solcard-session.enc -pass env:SOLCARD_ENC_KEY
+
+   # Read session
+   openssl enc -d -aes-256-cbc -pbkdf2 \
+     -in ~/.solcard-session.enc -pass env:SOLCARD_ENC_KEY
+   ```
+
+3. **Sanitized logging.** Never log:
+   - Full PAN (log last 4 only: `****-****-****-1234`)
+   - CVV (never, not even masked)
+   - Full session cookies (log first 8 chars only)
+   - Fingerprint sealed result
+
+4. **Session scope.** One session per agent instance. Do not share sessions across agents or persist beyond a single operational window.
+
+5. **Deposit address verification.** Before sending funds, verify the deposit address:
+   - Matches the expected network (Solana addresses start with base58, EVM addresses start with 0x)
+   - Was returned by the API in the current session (not cached from a previous run)
+
+6. **Amount verification.** Before sending crypto:
+   - Verify `expectedAmount` from the API against the requested USD amount and current market rate
+   - Flag if the implied exchange rate deviates more than 3% from market
+
+## Gotchas
+
+1. **Fingerprint expiry (~24h).** The `x-fp-sealed-result` is generated by Fingerprint.js Pro and expires approximately every 24 hours. When it expires, you get 403s. The agent cannot regenerate it -- the user must re-extract from the browser. Build alerting for this.
+
+2. **CSRF token rotation.** The CSRF token rotates on responses. You must parse `Set-Cookie` headers after every request and update your stored token. Missing this causes cascading 403 failures.
+
+3. **Card details may require browser automation.** The `/cards/slot/{id}` endpoint may not return the full PAN/CVV in all cases. SolCard may gate sensitive card data behind a secure iframe widget. If the API returns masked data, you need Playwright to:
+   - Navigate to the card details page in the SolCard dashboard
+   - Click "Show card details"
+   - Extract PAN/CVV from the rendered iframe
+   - This is a fallback -- try the API first
+
+4. **Deposit addresses are per-request.** Never reuse a deposit address from a previous API call. Always initiate a new deposit to get a fresh address. Sending to an old address may result in lost funds.
+
+5. **Fee variation by card type.** Standard Mastercard charges 5% topup fee. Visa (full access, KYC required) charges 0%. Always check `/v1/deposit/fee` before depositing.
+
+6. **FX spread on non-USD merchants.** The card is USD-denominated. Merchants charging in EUR, GBP, etc. will incur a 0-2% FX spread on top of the network conversion rate.
+
+7. **Solana is fastest, Base is cheapest.** If the agent holds USDC on multiple chains, prefer Solana for time-sensitive purchases and Base for cost-sensitive ones. Avoid Ethereum unless funds are already there.
+
+8. **Railway backend, Cloudflare CDN.** The API runs on Railway with Cloudflare in front. Rate limiting and bot detection are Cloudflare-managed. Keep request patterns human-like -- avoid rapid sequential calls. Add 500ms-2s jitter between requests.
+
+9. **Session refresh before expiry.** Don't wait for a 401/403 to refresh. Proactively call `/v2/auth/refresh` every 30 minutes. The session cookie likely expires in 1-2 hours.
+
+10. **Fund recovery exists.** If funds are sent to the wrong address or without a deposit, the `/v1/fund-recovery/*` endpoints can help. Don't assume funds are lost.
+
+## Checklist
+
+Before going live with the agent, verify each of these:
+
+### Session Extraction
+- [ ] Extracted `connect.sid` from browser DevTools
+- [ ] Extracted `__cf_bm` cookie
+- [ ] Extracted `x-csrf-token` header
+- [ ] Extracted `x-fp-sealed-result` header
+- [ ] Session stored encrypted at rest
+- [ ] `GET /auth/user` returns 200 with correct email
+
+### Session Refresh
+- [ ] `POST /v2/auth/refresh` returns 200
+- [ ] New cookies are parsed from `Set-Cookie` response
+- [ ] CSRF token is updated from response
+- [ ] Proactive refresh scheduled (every 30 min)
+- [ ] 403 fingerprint expiry detected and alerts user
+
+### Deposit Flow
+- [ ] `GET /cards` returns card list with balance
+- [ ] `GET /v1/deposit/fee` returns fee quote
+- [ ] `GET /cards/deposit-types` returns available networks
+- [ ] `POST /cards/slot/{slot}/deposit` returns deposit address
+- [ ] Deposit address matches expected network format
+- [ ] Crypto sent to fresh deposit address (not cached)
+- [ ] `GET /deposit/{id}` polled until COMPLETED
+- [ ] Deposit reflected in card balance
+
+### Card Detail Retrieval
+- [ ] `GET /cards/slot/{id}` returns card details
+- [ ] If API returns masked data, Playwright fallback works
+- [ ] PAN/CVV used in memory only, never written to disk
+- [ ] Card details cleared from memory after purchase
+
+### Security
+- [ ] Session file encrypted with AES-256-CBC
+- [ ] No PAN/CVV in logs (even in debug mode)
+- [ ] No full cookies in logs
+- [ ] Exchange rate sanity check (within 3% of market)
+- [ ] Deposit amount matches expectation before sending
+- [ ] Request jitter (500ms-2s) between API calls

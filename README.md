@@ -34,6 +34,12 @@ Skills for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) focused
 |---|---|
 | [Crypto Alpha Writer](skills/crypto-alpha-writer/SKILL.md) | On-chain intelligence report generation targeting CT/degen audience. Data collection via paid APIs, cross-referencing, and natural non-AI voice. |
 
+### Payment & Commerce
+
+| Skill | Description |
+|---|---|
+| [SolCard Agent](skills/solcard-agent/SKILL.md) | Crypto-to-card payment automation via SolCard's reverse-engineered API. Session management, deposit flow across 9 networks, virtual Visa/Mastercard retrieval, and security rules for autonomous agent purchases. |
+
 ### Real-Time Multiplayer
 
 | Skill | Description |
