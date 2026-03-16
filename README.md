@@ -9,8 +9,10 @@ Skills for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) focused
 | Skill | Description |
 |---|---|
 | [deBridge Integration](skills/debridge-integration/SKILL.md) | Cross-chain bridging via deBridge DLN API. 12 critical gotchas, fee structures, order lifecycle, and a complete integration checklist. |
+| [Jupiter Swap](skills/solana-jupiter-swap/SKILL.md) | Jupiter Swap API v1 integration for Solana token swaps. Quote fetching, transaction building, multi-wallet buy/sell patterns, Token-2022 edge cases, and 10 gotchas. |
 | [Solana Browser Wallet](skills/solana-browser-wallet/SKILL.md) | Ephemeral browser-based Solana wallet patterns. In-memory key management, encrypted IndexedDB vault, recovery flows, and security checklist. |
 | [White-Label Bridge](skills/white-label-bridge/SKILL.md) | Standalone bridge widget with platform fee collection. Fee-first architecture, live quotes, branding removal checklist, and error handling patterns. |
+| [Ephemeral Wallet Pipeline](skills/ephemeral-wallet-pipeline/SKILL.md) | Full generate-fund-execute-consolidate lifecycle for multi-wallet operations. State machine, amount jitter, error recovery rules, and the 6 non-negotiable recovery patterns that prevent fund loss. |
 | [Multi-Chain Wallet Integration](skills/multi-chain-wallet-integration/SKILL.md) | Connecting MetaMask + Phantom + Solflare in one app. Signature-based auth (EIP-191 + Ed25519), chain-scoped state, deposit verification, and the 6 wallet bugs you will hit. |
 
 ### Smart Contracts & Deployment
@@ -26,6 +28,7 @@ Skills for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) focused
 | Skill | Description |
 |---|---|
 | [Stealth Bundle](skills/stealth-bundle/SKILL.md) | Staggered multi-wallet transaction execution with configurable jitter. Avoids on-chain clustering detection for coordinated operations. |
+| [Fund Recovery](skills/fund-recovery/SKILL.md) | Emergency procedures for recovering funds from failed pipelines, stuck bridges, or orphaned ephemeral wallets. Triage flowchart, 6 recovery scenarios, and prevention checklist. |
 | [Wallet Safety Check](skills/wallet-safety-check/SKILL.md) | Pre-push security audit for crypto projects. Scans for private key exposure, credential leaks, unsafe storage, and git history contamination. |
 
 ### Content & Research
@@ -33,6 +36,8 @@ Skills for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) focused
 | Skill | Description |
 |---|---|
 | [Crypto Alpha Writer](skills/crypto-alpha-writer/SKILL.md) | On-chain intelligence report generation targeting CT/degen audience. Data collection via paid APIs, cross-referencing, and natural non-AI voice. |
+| [CT Tweet Crafter](skills/ct-tweet-crafter/SKILL.md) | Tweet drafting for crypto projects and on-chain analysis. Voice calibration from 6+ rounds of feedback, hook patterns, thread structure, and quality checklist. |
+| [Deep Research Burn](skills/deep-research-burn/SKILL.md) | Fan-out parallel research agents to productively burn unused weekly/daily Claude Code limits. Produces context-dense research files reusable across sessions. |
 
 ### Payment & Commerce
 
@@ -76,7 +81,7 @@ allowed-tools: debridge-integration, solana-browser-wallet
 
 These skills are distilled from:
 
-- **80+ hours** of Claude Code sessions across 5 crypto projects
+- **100+ hours** of Claude Code sessions across 7 crypto projects
 - **30+ sessions** building a live multiplayer game with ETH and SOL stakes
 - **13+ bridge transaction bugs** debugged on mainnet (yes, real money was lost)
 - **12+ refund-related bugs** where real user funds were stuck
